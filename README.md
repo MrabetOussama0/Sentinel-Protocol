@@ -10,6 +10,18 @@ Planetary missions rely on rovers and field robots operating far from Earth, whe
 
 Sentinel Protocol is an AI decision-support engine that continuously evaluates incoming hazard signals and classifies each situation into one of three response tiers — **Green** (safe to wait for Earth), **Yellow** (take a safe holding action while notifying Earth), or **Red** (act immediately, report afterward). It does this by comparing an estimated *time-to-harm* against the *time it would take to hear back from Earth*, using a transparent, explainable decision-time-budget calculation rather than an opaque model. Every decision Sentinel makes is logged with a plain-language explanation of its reasoning, so mission controllers can trust and audit its choices after the fact.
 
+## System Architecture
+
+Sentinel Protocol runs as the onboard intelligence of a **single planetary rover**. The rover carries its own scientific instruments, navigates autonomously, and is the sole point of contact for instructions from Earth.
+
+The rover's AI plays two distinct safety roles:
+
+1. **Autonomous hazard response** (implemented, see below) — when the rover detects an emerging danger (a cliff, a storm, falling debris, a battery crisis, or a loss of contact with Earth), it uses the decision-time-budget engine to decide whether there is time to escalate to Earth or whether it must act immediately.
+
+2. **Command validation** (implemented, see below) — before executing an incoming order from Earth, the rover's AI evaluates whether that command would create a conflict with the current sensor state. For example, if Earth instructs the rover to continue moving forward but onboard sensors show a cliff edge ahead that Earth's last data update didn't capture, the rover intervenes: it halts the command, holds position, and reports the conflict back to Earth rather than executing an order that could destroy the mission. If no conflict is detected, the command is passed through and executed normally. This means Sentinel isn't only protecting against environmental hazards — it also acts as a safeguard against commands based on outdated or incomplete information, without ever overriding Earth's authority outright.
+
+A solar charging dock at the base station allows the rover to recharge from a fixed power source in emergency low-power scenarios — one of the fallback actions available under the YELLOW-tier response for battery-critical situations.
+
 ## Scope: Threat Scenarios (Step 1)
 
 To keep the system focused and demonstrable, Sentinel is built around five representative hazard types, each defined by a detectable signal, an estimated window before the danger becomes irreversible, and a safe fallback action if there isn't time to wait for Earth.
