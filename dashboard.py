@@ -88,6 +88,7 @@ class TickState(NamedTuple):
     sensors:        dict
     time_to_harm_s: float
     tier:           DecisionTier
+    holding_action: str | None  # 'hold_in_place' | 'reposition_to_safety' | None
 
 def _cliff_edge_model(ticks: int):
     distance_m, speed_ms, accel, tick_dur_s = 100.0, 0.02, 0.003, 30
@@ -148,13 +149,32 @@ _MODELS = {
     "comms_blackout":   _comms_blackout_model,
 }
 
+# Sensor thresholds used by choose_holding_action
+_REPOSITION_UNSAFE_WIND_MS = 20.0
+_REPOSITION_UNSAFE_CHARGE  =  5.0
+
+def choose_holding_action(threat_type: str, sensor_state: dict,
+                           comm_delay_s: float = 780) -> str:
+    """Return 'hold_in_place' or 'reposition_to_safety' for a YELLOW-tier tick."""
+    if threat_type == "cliff_edge":
+        return "hold_in_place"
+    if threat_type == "dust_storm":
+        return "hold_in_place" if sensor_state.get("wind_speed_ms", 0) >= _REPOSITION_UNSAFE_WIND_MS else "reposition_to_safety"
+    if threat_type == "battery_critical":
+        return "hold_in_place" if sensor_state.get("charge_pct", 100) <= _REPOSITION_UNSAFE_CHARGE else "reposition_to_safety"
+    if threat_type in ("rockfall", "comms_blackout"):
+        return "hold_in_place"
+    return "hold_in_place"
+
 def run_scenario(threat_type: str, ticks: int, comm_delay_s: float) -> list[TickState]:
     """Pre-compute all ticks into a list (Streamlit-friendly — no generator in session state)."""
     results = []
     for i, (sensors, tth) in enumerate(_MODELS[threat_type](ticks)):
         tier = classify_threat(threat_type, tth, comm_delay_s)
+        ha   = choose_holding_action(threat_type, sensors, comm_delay_s) if tier == DecisionTier.YELLOW else None
         results.append(TickState(tick=i, sensors=sensors,
-                                 time_to_harm_s=round(tth, 1), tier=tier))
+                                 time_to_harm_s=round(tth, 1), tier=tier,
+                                 holding_action=ha))
     return results
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,16 +295,26 @@ SENSOR_UNITS = {
 # UI helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _tier_badge_html(tier_val: str) -> str:
+def _tier_badge_html(tier_val: str, holding_action: str | None = None) -> str:
     color = TIER_COLOR[tier_val]
     bg    = TIER_BG[tier_val]
     icon  = TIER_ICON[tier_val]
+    ha_line = ""
+    if holding_action:
+        ha_icon = "🧲" if holding_action == "hold_in_place" else "🔄"
+        ha_label = holding_action.replace("_", " ")
+        ha_line = (
+            f'<br><span style="color:{color};font-size:0.78rem;'
+            f'background:rgba(0,0,0,0.06);border-radius:4px;padding:2px 8px;">'
+            f'{ha_icon} {ha_label}</span>'
+        )
     return (
         f'<div style="background:{bg};border:2px solid {color};border-radius:12px;'
         f'padding:18px 28px;text-align:center;">'
         f'<span style="font-size:2.4rem;font-weight:800;color:{color};">'
         f'{icon} {tier_val}</span><br>'
         f'<span style="color:{color};font-size:0.85rem;">{TIER_ACTION[tier_val]}</span>'
+        f'{ha_line}'
         f'</div>'
     )
 
@@ -430,11 +460,13 @@ if st.session_state.running and ptr < len(all_ticks):
     else:
         ai_text = "(AI reasoning disabled)"
 
+    ha_val = state.holding_action or ""
     st.session_state.history.append({
-        "Tick":      ptr,
-        "Tier":      f"{TIER_ICON[tier_val]} {tier_val}",
-        "TTH (s)":   state.time_to_harm_s,
-        "Adj Ratio": round(ratio, 3),
+        "Tick":           ptr,
+        "Tier":           f"{TIER_ICON[tier_val]} {tier_val}",
+        "Holding Action": ha_val,
+        "TTH (s)":        state.time_to_harm_s,
+        "Adj Ratio":      round(ratio, 3),
         **state.sensors,
     })
     st.session_state.log_feed.append({
@@ -479,7 +511,7 @@ with prog_col:
     st.progress(n_done / len(all_ticks))
 
 with tier_col:
-    st.markdown(_tier_badge_html(last_tv), unsafe_allow_html=True)
+    st.markdown(_tier_badge_html(last_tv, last_state.holding_action), unsafe_allow_html=True)
 
 with tth_col:
     prev_tth = all_ticks[last["Tick"] - 1].time_to_harm_s if last["Tick"] > 0 else None
