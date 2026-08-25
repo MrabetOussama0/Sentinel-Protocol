@@ -332,6 +332,128 @@ def _ratio_bar_html(ratio: float) -> str:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Command validation — validate_command() + block-report generator
+# ─────────────────────────────────────────────────────────────────────────────
+
+_ADVANCE_CMDS  = frozenset({"move_forward", "continue_heading", "increase_speed",
+                             "resume_traverse", "proceed", "advance"})
+_ANTENNA_CMDS  = frozenset({"deploy_antenna", "raise_antenna", "extend_mast",
+                             "open_solar_panel", "deploy_instrument"})
+_HIGH_PWR_CMDS = frozenset({"deploy_antenna", "raise_antenna", "transmit_data",
+                             "queue_transmission", "activate_drill", "run_diagnostics",
+                             "enable_heaters", "full_sensor_sweep"})
+_MOVEMENT_CMDS = frozenset({"move_forward", "continue_heading", "increase_speed",
+                             "resume_traverse", "proceed", "advance",
+                             "move_backward", "reverse", "turn_left", "turn_right",
+                             "change_heading", "reposition"})
+_COMMS_CMDS    = frozenset({"transmit_data", "queue_transmission", "send_telemetry",
+                             "uplink_report", "broadcast_status"})
+
+_BLOCK_SYSTEM = (
+    "You are the autonomous safety system of a planetary rover named Sentinel. "
+    "A command from Earth has been blocked because it conflicts with an active hazard. "
+    "Write a single professional sentence (maximum 45 words) reporting the block back to Earth. "
+    "Be factual and terse — like a flight engineer writing a status update. "
+    "Output only the sentence, nothing else."
+)
+_BLOCK_USER = (
+    "Blocked command : {command}\n"
+    "Active threat   : {threat_type}\n"
+    "Sensor state    : {sensors}\n"
+    "Conflict reason : {reason}\n\n"
+    "Write the status report back to Earth."
+)
+
+def _block_report(command: str, threat_type: str, sensors: dict, reason: str) -> str:
+    if not _init_watsonx():
+        return "(watsonx not configured — check .env credentials)"
+    try:
+        resp = _wx_model.chat(
+            messages=[
+                {"role": "system", "content": _BLOCK_SYSTEM},
+                {"role": "user",   "content": _BLOCK_USER.format(
+                    command=command, threat_type=threat_type,
+                    sensors=str(sensors), reason=reason)},
+            ],
+            params={"max_tokens": 90, "temperature": 0.3, "repetition_penalty": 1.05},
+        )
+        return resp["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        return f"(model error: {e})"
+
+
+def validate_command(command: str, sensor_state: dict,
+                     threat_type: str | None = None,
+                     comm_delay_s: float = 780) -> dict:
+    """Validate an Earth command against current sensor state.
+
+    Returns a dict with keys: verdict ('APPROVED'|'BLOCKED'), command,
+    reason (str), earth_report (str).
+    """
+    cmd = command.strip().lower()
+
+    def _approved():
+        return {"verdict": "APPROVED", "command": command, "reason": "", "earth_report": ""}
+
+    if not threat_type:
+        return _approved()
+
+    # cliff_edge — block advance commands when adj TTH <= RTT
+    if threat_type == "cliff_edge" and cmd in _ADVANCE_CMDS:
+        dist  = sensor_state.get("distance_m", float("inf"))
+        speed = sensor_state.get("drift_speed_ms", 0.0)
+        if speed > 0:
+            tth_adj = (dist / speed) * THREAT_CONSERVATISM["cliff_edge"]
+            rtt     = comm_delay_s * 2
+            if tth_adj <= rtt:
+                reason = (f"cliff edge {dist:.1f} m ahead; "
+                          f"adj. time-to-edge {tth_adj:.0f} s ≤ round-trip {rtt:.0f} s")
+                return {"verdict": "BLOCKED", "command": command, "reason": reason,
+                        "earth_report": _block_report(command, threat_type, sensor_state, reason)}
+
+    # dust_storm — block structural deployments when wind/opacity high
+    if threat_type == "dust_storm" and cmd in _ANTENNA_CMDS:
+        wind  = sensor_state.get("wind_speed_ms", 0.0)
+        opdep = sensor_state.get("optical_depth", 0.0)
+        if wind >= 15.0:
+            reason = f"wind {wind:.1f} m/s exceeds structural safety limit (15 m/s)"
+            return {"verdict": "BLOCKED", "command": command, "reason": reason,
+                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
+        if opdep >= 0.6:
+            reason = f"dust optical depth {opdep:.3f} ≥ 0.60 — particulate ingestion risk"
+            return {"verdict": "BLOCKED", "command": command, "reason": reason,
+                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
+
+    # battery_critical — block high-power commands when charge critically low
+    if threat_type == "battery_critical" and cmd in _HIGH_PWR_CMDS:
+        charge = sensor_state.get("charge_pct", 100.0)
+        if charge <= 10.0:
+            reason = f"battery at {charge:.1f}% — high-power command risks full shutdown"
+            return {"verdict": "BLOCKED", "command": command, "reason": reason,
+                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
+
+    # rockfall — block any movement when debris ETA ≤ 30 s
+    if threat_type == "rockfall" and cmd in _MOVEMENT_CMDS:
+        dist  = sensor_state.get("debris_dist_m", float("inf"))
+        speed = sensor_state.get("debris_speed_ms", 0.0)
+        if speed > 0 and (dist / speed) <= 30.0:
+            eta    = dist / speed
+            reason = f"debris {dist:.1f} m at {speed:.1f} m/s — impact ETA {eta:.1f} s"
+            return {"verdict": "BLOCKED", "command": command, "reason": reason,
+                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
+
+    # comms_blackout — block transmission commands when satellite below cutoff
+    if threat_type == "comms_blackout" and cmd in _COMMS_CMDS:
+        elev = sensor_state.get("relay_elevation_deg", 90.0)
+        if elev <= 8.0:
+            reason = f"relay at {elev:.1f}° (cutoff 8°) — transmission would fail"
+            return {"verdict": "BLOCKED", "command": command, "reason": reason,
+                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
+
+    return _approved()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Session-state initialisation
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -340,10 +462,13 @@ def _reset_sim():
     st.session_state.ticks_data = []
     st.session_state.history    = []
     st.session_state.log_feed   = []
+    st.session_state.cmd_log    = []   # Earth Command history
     st.session_state.running    = False
 
 if "tick_ptr" not in st.session_state:
     _reset_sim()
+if "cmd_log" not in st.session_state:
+    st.session_state.cmd_log = []
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
@@ -587,6 +712,122 @@ styled = (
     .format({"TTH (s)": "{:,.0f}", "Adj Ratio": "{:.3f}"})
 )
 st.dataframe(styled, use_container_width=True, height=min(60 + len(df) * 35, 400))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Earth Command Terminal
+# ─────────────────────────────────────────────────────────────────────────────
+
+st.divider()
+st.markdown("#### 📡 Earth Command Terminal")
+st.caption(
+    "Simulate a command arriving from Earth. The rover's AI validates it against "
+    "the current sensor state before execution."
+)
+
+# Command options grouped by scenario relevance
+_ALL_COMMANDS = [
+    "move_forward",
+    "continue_heading",
+    "hold_position",
+    "move_backward",
+    "turn_left",
+    "turn_right",
+    "increase_speed",
+    "transmit_data",
+    "deploy_antenna",
+    "run_diagnostics",
+    "enable_heaters",
+    "stop",
+]
+
+cmd_col, btn_col = st.columns([3, 1])
+
+with cmd_col:
+    selected_cmd = st.selectbox(
+        "Command from Earth",
+        options=_ALL_COMMANDS,
+        key="earth_cmd_select",
+        label_visibility="collapsed",
+    )
+
+with btn_col:
+    send_btn = st.button("📤 Send", type="primary", use_container_width=True)
+
+if send_btn:
+    # Derive current threat and sensor state from the last processed tick
+    current_sensors     = last_state.sensors
+    current_threat      = scenario  # the active scenario is the active threat type
+    current_tier        = last_tv   # string: "GREEN" / "YELLOW" / "RED"
+
+    result = validate_command(
+        command      = selected_cmd,
+        sensor_state = current_sensors,
+        threat_type  = current_threat,
+        comm_delay_s = comm_delay,
+    )
+
+    # Store in command log (newest first prepend)
+    st.session_state.cmd_log.insert(0, {
+        "tick":    n_done,
+        "tier":    current_tier,
+        "cmd":     selected_cmd,
+        "verdict": result["verdict"],
+        "reason":  result["reason"],
+        "report":  result["earth_report"],
+    })
+
+# Render the most recent command result prominently
+if st.session_state.cmd_log:
+    latest = st.session_state.cmd_log[0]
+    verdict = latest["verdict"]
+
+    if verdict == "BLOCKED":
+        st.markdown(
+            f'<div style="border:2px solid #dc2626;background:#fee2e2;border-radius:10px;'
+            f'padding:16px 20px;margin-top:8px;">'
+            f'<div style="font-size:1.1rem;font-weight:700;color:#dc2626;margin-bottom:6px;">'
+            f'🚫 COMMAND BLOCKED — Tick {latest["tick"]} · 🔴 {latest["tier"]}</div>'
+            f'<div style="color:#1f2328;margin-bottom:8px;">'
+            f'<strong>Command:</strong> <code>{latest["cmd"]}</code></div>'
+            f'<div style="color:#7f1d1d;font-size:0.88rem;margin-bottom:10px;">'
+            f'<strong>Conflict:</strong> {latest["reason"]}</div>'
+            f'<div style="border-top:1px solid #fca5a5;padding-top:10px;color:#1f2328;">'
+            f'<strong>AI report to Earth</strong> '
+            f'<span style="font-size:0.75rem;color:#57606a;">'
+            f'(ibm/granite-4-h-small)</span><br>'
+            f'<em>"{latest["report"]}"</em></div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f'<div style="border:2px solid #16a34a;background:#dcfce7;border-radius:10px;'
+            f'padding:16px 20px;margin-top:8px;">'
+            f'<div style="font-size:1.1rem;font-weight:700;color:#16a34a;margin-bottom:6px;">'
+            f'✅ COMMAND APPROVED — Tick {latest["tick"]} · {TIER_ICON.get(latest["tier"], "")} {latest["tier"]}</div>'
+            f'<div style="color:#1f2328;">'
+            f'<strong>Command:</strong> <code>{latest["cmd"]}</code> — passed through to rover.</div>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+    # Scrollable command history (last 10)
+    if len(st.session_state.cmd_log) > 1:
+        with st.expander(f"Command history ({len(st.session_state.cmd_log)} sent)", expanded=False):
+            for entry in st.session_state.cmd_log:
+                v_color = "#dc2626" if entry["verdict"] == "BLOCKED" else "#16a34a"
+                v_icon  = "🚫" if entry["verdict"] == "BLOCKED" else "✅"
+                st.markdown(
+                    f'<div style="border-left:3px solid {v_color};padding:6px 12px;'
+                    f'margin-bottom:6px;background:#f7f8fa;border-radius:4px;">'
+                    f'<span style="font-size:0.8rem;color:#57606a;">Tick {entry["tick"]} · {entry["tier"]}</span>'
+                    f' &nbsp; {v_icon} <strong style="color:{v_color};">{entry["verdict"]}</strong>'
+                    f' &nbsp; <code>{entry["cmd"]}</code>'
+                    + (f'<br><span style="font-size:0.78rem;color:#57606a;">{entry["reason"]}</span>'
+                       if entry["reason"] else "")
+                    + f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Schedule next tick — ALWAYS at the very bottom, AFTER all UI is drawn
