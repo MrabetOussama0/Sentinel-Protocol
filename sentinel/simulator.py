@@ -57,7 +57,7 @@ def choose_holding_action(
     """
     if threat_type == "cliff_edge":
         return "hold_in_place"
-    if threat_type == "dust_storm":
+    if threat_type in ("dust_storm", "dust_storm_slow"):
         return (
             "hold_in_place"
             if sensor_state.get("wind_speed_ms", 0.0) >= _REPOSITION_UNSAFE_WIND_MS
@@ -69,7 +69,7 @@ def choose_holding_action(
             if sensor_state.get("charge_pct", 100.0) <= _REPOSITION_UNSAFE_CHARGE
             else "reposition_to_safety"
         )
-    if threat_type in ("rockfall", "comms_blackout"):
+    if threat_type in ("rockfall", "comms_blackout", "full_blackout"):
         return "hold_in_place"
     return "hold_in_place"
 
@@ -406,12 +406,6 @@ _MODELS: dict[str, object] = {
     "full_blackout":        _full_blackout_model,
 }
 
-# Register full_blackout in THREAT_CONSERVATISM for classification
-# (uses same conservatism as battery_critical — discharge is predictable)
-THREAT_CONSERVATISM.setdefault("full_blackout", 0.90)
-THREAT_CONSERVATISM.setdefault("blackout_survival", 0.90)
-THREAT_CONSERVATISM.setdefault("dust_storm_slow", 0.90)
-
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -436,22 +430,15 @@ def run_scenario(
         robot_state    : Uppercase word describing physical state (MOVING, HOLDING, etc.)
         robot_activity : Plain-language sentence describing the rover's current action.
     """
-    # Map display threat types to THREAT_CONSERVATISM keys
-    _classify_as = {
-        "dust_storm_slow": "dust_storm",
-        "full_blackout":   "comms_blackout",
-    }
-
     if threat_type not in _MODELS:
         raise ValueError(f"Unknown threat type: {threat_type!r}")
 
-    classify_key = _classify_as.get(threat_type, threat_type)
     model = _MODELS[threat_type](ticks)
 
     for tick_idx, (sensors, tth) in enumerate(model):
-        tier = classify_threat(classify_key, tth, comm_delay_s)
+        tier = classify_threat(threat_type, tth, comm_delay_s)
         ha   = (
-            choose_holding_action(classify_key, sensors, comm_delay_s)
+            choose_holding_action(threat_type, sensors, comm_delay_s)
             if tier == DecisionTier.YELLOW
             else None
         )

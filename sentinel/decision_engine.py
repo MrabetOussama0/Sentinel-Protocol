@@ -65,9 +65,11 @@ class Threat:
 THREAT_CONSERVATISM: dict[str, float] = {
     "cliff_edge":           0.80,   # sensor noise → be conservative
     "dust_storm":           0.90,   # storm intensity can escalate quickly
+    "dust_storm_slow":      0.90,   # same physics, slower ramp
     "battery_critical":     0.95,   # discharge rate is fairly predictable
     "rockfall":             0.70,   # highly dynamic, worst-case bias
     "comms_blackout":       1.00,   # predictable orbital geometry
+    "full_blackout":        0.90,   # relay lost; battery drain is predictable
     # Unknown anomaly detected by IsolationForest but not matched to a known
     # threat type.  Worst-case bias: treat as potentially as fast-escalating as
     # rockfall.  All risky actions are blocked by safety_gate until Earth
