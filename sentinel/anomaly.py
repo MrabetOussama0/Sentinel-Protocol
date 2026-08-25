@@ -42,9 +42,13 @@ Integration with decision_engine / safety_gate
 If is_anomaly=True and the sensor_state does not match any known threat
 type (cliff_edge, dust_storm, battery_critical, rockfall, comms_blackout),
 the result carries threat_type="unclassified_anomaly" and tier=YELLOW.
-That threat type is intentionally absent from THREAT_CONSERVATISM so
-safety_gate.is_action_safe() passes it through as a neutral hold signal
-rather than triggering a specific rule block.
+
+"unclassified_anomaly" is registered in THREAT_CONSERVATISM with a
+conservative multiplier of 0.75 (between rockfall and cliff_edge), and
+safety_gate.is_action_safe() blocks all risky actions (movement, high-power,
+antenna deployment, comms) whenever this threat is active.  Only _ALWAYS_SAFE
+actions (hold, stop, emergency_full_stop) are permitted until Earth
+confirms the nature of the anomaly.
 """
 
 from __future__ import annotations

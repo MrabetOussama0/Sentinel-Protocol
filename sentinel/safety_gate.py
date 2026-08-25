@@ -166,6 +166,28 @@ def is_action_safe(
                     blocked_by="comms_blackout",
                 )
 
+        if threat == "unclassified_anomaly":
+            # Nature of hazard is unknown — block all risky action categories
+            # unconditionally until Earth confirms what the anomaly actually is.
+            # Only _ALWAYS_SAFE actions (stop, hold, emergency_full_stop, …)
+            # are permitted; those were already approved above before this loop.
+            _RISKY = (
+                _ADVANCE_CMDS
+                | _MOVEMENT_CMDS
+                | _HIGH_POWER_CMDS
+                | _ANTENNA_CMDS
+                | _COMMS_CMDS
+            )
+            if action in _RISKY:
+                return SafetyCheckResult(
+                    safe=False, action=proposed_action,
+                    reason=(
+                        "unclassified anomaly active \u2014 nature of hazard unknown; "
+                        "all non-hold actions blocked pending Earth confirmation"
+                    ),
+                    blocked_by="unclassified_anomaly",
+                )
+
     return SafetyCheckResult(safe=True, action=proposed_action, reason="", blocked_by="")
 
 
