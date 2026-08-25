@@ -1,10 +1,39 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Sentinel Protocol logo" width="500"/>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.12+-blue" alt="Python 3.12+"/>
+  <img src="https://img.shields.io/badge/Built%20with-IBM%20Bob-0F6E56" alt="Built with IBM Bob"/>
+  <img src="https://img.shields.io/badge/Powered%20by-IBM%20watsonx.ai-534AB7" alt="Powered by watsonx.ai"/>
+  <img src="https://img.shields.io/badge/Dashboard-Streamlit-FF4B4B" alt="Streamlit"/>
+  <img src="https://img.shields.io/badge/License-MIT-lightgrey" alt="MIT License"/>
+</p>
+
 # Sentinel Protocol
 
 **AI-powered autonomy engine for planetary field robots — deciding, in real time, when to act alone and when to wait for Earth.**
 
+### Contents
+- [Problem Statement](#problem-statement)
+- [Solution Description](#solution-description)
+- [System Architecture](#system-architecture)
+- [Scope: Threat Scenarios](#scope-threat-scenarios-step-1)
+- [AI Approach and Architecture](#ai-approach-and-architecture)
+- [Live Dashboard](#live-dashboard)
+- [Setup and How to Run](#setup-and-how-to-run)
+- [Challenge Theme](#challenge-theme)
+- [How IBM Bob Was Used](#how-ibm-bob-was-used)
+
+
+
 ## Problem Statement
 
 Planetary missions rely on rovers and field robots operating far from Earth, where communication delays range from several minutes (Mars) to complete blackouts during solar interference or terrain obstruction. In these gaps, a rover facing a sudden hazard — a cliff edge, a dust storm, a critical battery drop, falling debris, or a total loss of signal — cannot simply wait for human instruction if the threat will become irreversible before a response can arrive. Mission teams and the robots themselves need a way to know, moment to moment, whether a situation is safe to escalate to Earth or urgent enough to demand immediate autonomous action. Without this, missions risk either dangerous delays or reckless unsupervised decisions.
+
+This is not a hypothetical risk. NASA's twin Mars Exploration Rovers, Spirit and Opportunity, both suffered mission-ending failures rooted in exactly this gap between hazard and response time. In 2009, Spirit drove into a patch of soft sand it could not recognize as dangerous in time, became permanently stuck, and was unable to reposition itself to keep its solar panels angled toward the sun — it lost power over the following Martian winter and never made contact again. In 2018, a planet-wide dust storm cut off Opportunity's sunlight for weeks; the rover entered a low-power fault and lost communication with Earth, ending its 14-year mission. In both cases, a system capable of recognizing the danger early and independently choosing a self-preserving action — such as halting before entering unstable terrain, or proactively returning to a known safe position with reliable sunlight before a storm fully cut off power and communication — could plausibly have changed the outcome.
+
+Sentinel Protocol is built around this exact gap: giving a field robot the judgment to recognize when a threat cannot wait for Earth, and the ability to choose a genuine self-rescue action — not just stopping in place, but actively repositioning toward safety, entering a low-power holding state, and queuing a full status report to send the moment contact with Earth is restored.
 
 ## Solution Description
 
@@ -12,15 +41,17 @@ Sentinel Protocol is an AI decision-support engine that continuously evaluates i
 
 ## System Architecture
 
-Sentinel Protocol runs as the onboard intelligence of a **single planetary rover**. The rover carries its own scientific instruments, navigates autonomously, and is the sole point of contact for instructions from Earth.
+Sentinel Protocol runs as the onboard intelligence of a rover carrying both its scientific instruments (soil analysis, atmospheric sensors, and similar equipment) and the AI decision-making system itself. Rather than reacting passively to instructions, the rover's AI sits between Earth and the rover's own actuators, playing two distinct safety roles:
 
-The rover's AI plays two distinct safety roles:
+1. **Autonomous hazard response** — when the rover detects an emerging danger (a cliff, a storm, falling debris, a battery crisis, or a loss of contact with Earth), it uses the decision-time-budget engine to decide whether there's time to escalate to Earth or whether it must act immediately.
 
-1. **Autonomous hazard response** (implemented, see below) — when the rover detects an emerging danger (a cliff, a storm, falling debris, a battery crisis, or a loss of contact with Earth), it uses the decision-time-budget engine to decide whether there is time to escalate to Earth or whether it must act immediately.
+2. **Command validation** — before executing an incoming order from Earth, the rover's AI evaluates whether carrying out that command as given could lead to harm given what it currently observes. For example, if Earth instructs the rover to continue moving forward but its sensors show a cliff edge ahead that Earth's last data update didn't capture, the AI intervenes: it halts the command, holds position, and reports the conflict back to Earth rather than executing an order that could destroy the mission. If no conflict is detected, the command is passed through and executed normally. This means Sentinel isn't only protecting against environmental hazards — it also acts as a safeguard against commands based on outdated or incomplete information reaching Earth's operators, without ever overriding Earth's authority outright.
 
-2. **Command validation** (implemented, see below) — before executing an incoming order from Earth, the rover's AI evaluates whether that command would create a conflict with the current sensor state. For example, if Earth instructs the rover to continue moving forward but onboard sensors show a cliff edge ahead that Earth's last data update didn't capture, the rover intervenes: it halts the command, holds position, and reports the conflict back to Earth rather than executing an order that could destroy the mission. If no conflict is detected, the command is passed through and executed normally. This means Sentinel isn't only protecting against environmental hazards — it also acts as a safeguard against commands based on outdated or incomplete information, without ever overriding Earth's authority outright.
+Both roles are implementations of a single underlying principle, detailed further below: no action — whether ordered by Earth or generated by the rover itself — executes without first passing a safety check.
 
-A solar charging dock at the base station allows the rover to recharge from a fixed power source in emergency low-power scenarios — one of the fallback actions available under the YELLOW-tier response for battery-critical situations.
+<p align="center">
+  <img src="assets/architecture-diagram.svg" alt="Sentinel Protocol architecture diagram: sensor inputs and Earth commands both flow through the decision-time-budget engine and universal safety gate, producing a GREEN, YELLOW, or RED response, with a blackout survival loop and watsonx AI reasoning layer feeding the live dashboard" width="680"/>
+</p>
 
 ## Scope: Threat Scenarios (Step 1)
 
@@ -41,7 +72,7 @@ These five scenarios form the basis for the decision engine, the live scenario s
 At the core of Sentinel Protocol is a **decision-time-budget engine**: for every detected hazard, the system estimates *time-to-harm* (how long until the situation becomes irreversible) and compares it against the *round-trip communication delay* to Earth. Rather than a single hard cutoff, the engine applies a **conservatism buffer** (a scenario-specific safety margin, e.g. 70–100% depending on hazard type) to the raw ratio of time-to-harm over round-trip delay, producing an adjusted ratio that determines the response tier:
 
 - 🔴 **RED** — adjusted ratio is very low (harm is imminent relative to Earth's response time) → the rover acts autonomously immediately and notifies Earth afterward.
-- 🟡 **YELLOW** — adjusted ratio is borderline (there's some time, but not comfortably enough) → the rover executes a safe holding action while notifying Earth in parallel.
+- 🟡 **YELLOW** — adjusted ratio is borderline (there's some time, but not comfortably enough) → the rover executes a safe holding action — which may mean stopping in place, or, when time allows, actively repositioning toward a known safe location (e.g. a spot with reliable sunlight or a docking/charging station) — while notifying Earth in parallel.
 - 🟢 **GREEN** — adjusted ratio is comfortably high (plenty of time relative to the round-trip delay) → the rover waits for Earth's response before acting.
 
 This approach keeps every decision transparent and auditable — there is no black-box classifier, only a clear, explainable calculation that a mission controller could review and verify after the fact.
@@ -66,9 +97,31 @@ On top of the rule-based decision engine, Sentinel Protocol integrates **IBM wat
 
 > "Sentinel autonomously executed evasive maneuvers to avoid cliff edge, initiating immediate hazard mitigation protocol per RED-tier directive; Earth notification scheduled post-action completion."
 
+### Command Validation
+
+Beyond reacting to environmental hazards, Sentinel applies the same decision-time-budget engine to a second use case: validating commands *coming from Earth* before executing them. Every incoming instruction is checked with `validate_command()` against the current sensor state — if executing the command would run the rover into an active hazard (for example, Earth instructing "move forward" while a cliff edge is still within the danger window, potentially based on outdated data), the command is **blocked**, the rover holds position, and an AI-generated explanation is sent back to Earth instead of the order being blindly obeyed. If no conflict exists, the command is approved and passed through unchanged. Sentinel never overrides Earth's authority outright — it only refuses to execute an order it can verify is unsafe given what it currently observes, and always reports why.
+
+### Universal Safety Gate and Blackout Survival Loop
+
+Command validation and autonomous hazard response are both implementations of a single underlying principle: **no action — whether ordered by Earth or generated by the rover itself — executes without first passing a safety check.** This is implemented as one reusable gate, `is_action_safe()`, used by every part of the system.
+
+This gate becomes critical during a **total communications blackout**, when Earth cannot be consulted at all. In that situation — for instance, comms are lost while the rover is near a cliff edge — Sentinel runs a continuous survival loop rather than a single reaction:
+
+1. **Check if stopping is safe.** If holding in place passes the safety gate, the rover stops and holds, periodically checking for Earth contact to resume.
+2. **If stopping is not safe** (e.g. already too close to an edge), the rover proposes a small corrective move — such as reversing a short distance — and that proposed move is itself validated through the same safety gate before it is executed. Nothing moves on an assumption; every step is checked.
+3. **While holding and waiting for Earth to return**, Sentinel continues monitoring other systems. If a new problem emerges mid-wait — for example, battery drops to critical — it proposes navigating to the nearest known safe, sunlit location, and that path is again validated through the safety gate before the rover moves.
+
+This means a total loss of contact does not leave the rover paralyzed or blindly reactive — it falls back to a single, consistent decision-making loop that treats every action, self-generated or externally ordered, with the same scrutiny.
+
 ## Live Dashboard
 
 Sentinel Protocol includes a standalone **Streamlit dashboard** (`dashboard.py`) that visualizes a scenario run in real time: live sensor readings for the active threat, the current decision tier with clear color coding (green/yellow/red), a live-updating AI-generated mission-log reasoning feed, and a scrolling history of past ticks and decisions. Users select a threat scenario from a dropdown (cliff_edge, dust_storm, battery_critical, rockfall, comms_blackout) and watch it play out tick by tick, mirroring how Sentinel would behave on an actual mission.
+
+<p align="center">
+  <img src="assets/dashboard-screenshot.png" alt="Sentinel Protocol dashboard showing live sensor readings, a color-coded decision tier, and an AI-generated reasoning feed" width="680"/>
+</p>
+
+<!-- TODO: replace assets/dashboard-screenshot.png with a real screenshot or GIF of dashboard.py running -->
 
 ## Setup and How to Run
 
@@ -79,7 +132,7 @@ Sentinel Protocol includes a standalone **Streamlit dashboard** (`dashboard.py`)
 3. Set your watsonx credentials as environment variables (do **not** hardcode them):
    - `WATSONX_API_KEY`
    - `WATSONX_PROJECT_ID`
-4. **Decision engine & simulator:** open `sentinel_decision_engine.ipynb` in JupyterLab to explore the core classification logic and run scenario simulations.
+4. **Decision engine & simulator:** open `notebooks/sentinel_analysis.ipynb` in JupyterLab to explore the core classification logic, scenario simulations, anomaly detection, and full system walkthrough.
 5. **Live dashboard:** run `streamlit run dashboard.py` and open the local URL it provides in your browser.
 
 ## Challenge Theme
