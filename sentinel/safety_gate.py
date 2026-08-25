@@ -192,14 +192,21 @@ def is_action_safe(
 
 
 # ---------------------------------------------------------------------------
-# Legacy Earth-command validator  (wraps is_action_safe for single-threat use)
+# Earth-command validator  (wraps is_action_safe; supports multiple threats)
 # ---------------------------------------------------------------------------
 
+# Absolute sensor thresholds that block high-power / movement regardless of
+# whether a named threat is active — catches dangerous states that fall through
+# when no threat_type is passed.
+_ABS_BATTERY_BLOCK_PCT  = 5.0   # battery at or below this → block all non-safe actions
+_ABS_BATTERY_BLOCK_CMDS = _HIGH_POWER_CMDS | _MOVEMENT_CMDS
+
+
 def validate_command(
-    command:      str,
-    sensor_state: dict,
-    threat_type:  str | None = None,
-    comm_delay_s: float = 780,
+    command:       str,
+    sensor_state:  dict,
+    threat_type:   str | list[str] | None = None,
+    comm_delay_s:  float = 780,
     _block_report_fn=None,
 ) -> ValidationResult:
     """Validate an incoming Earth command against the rover's current sensor state.
@@ -208,23 +215,47 @@ def validate_command(
     ----------
     command         : Incoming command string from Earth.
     sensor_state    : Current sensor readings dict.
-    threat_type     : Active threat category, or None.
+    threat_type     : Active threat category (str), list of active threats, or None.
+                      Accepts both forms so callers can pass multiple simultaneous
+                      threats without changing their API.
     comm_delay_s    : One-way comm delay in seconds.
     _block_report_fn: Optional callable(command, threat_type, sensors, reason) → str
                       for generating a watsonx Earth report on blocks.
                       If None, earth_report is an empty string.
     """
+    action = command.strip().lower()
+
+    # ── Absolute safety floor — no named threat needed ────────────────────────
+    # Even when no threat is active, commands that require significant power or
+    # movement are blocked if the battery is critically low.
+    if action not in _ALWAYS_SAFE and action in _ABS_BATTERY_BLOCK_CMDS:
+        charge = sensor_state.get("charge_pct", 100.0)
+        if charge <= _ABS_BATTERY_BLOCK_PCT:
+            reason = (f"absolute safety floor: battery {charge:.1f}% ≤ "
+                      f"{_ABS_BATTERY_BLOCK_PCT}% — command blocked regardless of threat state")
+            earth_report = ""
+            if _block_report_fn is not None:
+                earth_report = _block_report_fn(command, "battery_critical", sensor_state, reason)
+            return ValidationResult(verdict="BLOCKED", command=command,
+                                    reason=reason, earth_report=earth_report)
+
+    # ── Threat-aware gate ─────────────────────────────────────────────────────
     if not threat_type:
         return ValidationResult(verdict="APPROVED", command=command, reason="", earth_report="")
 
-    result = is_action_safe(command, sensor_state, [threat_type], comm_delay_s)
+    # Normalise to list so callers can pass either a str or list[str]
+    threats = [threat_type] if isinstance(threat_type, str) else list(threat_type)
+
+    result = is_action_safe(command, sensor_state, threats, comm_delay_s)
 
     if result.safe:
         return ValidationResult(verdict="APPROVED", command=command, reason="", earth_report="")
 
+    # Use the first matched threat for the block report (most salient)
+    report_threat = result.blocked_by or (threats[0] if threats else "unknown")
     earth_report = ""
     if _block_report_fn is not None:
-        earth_report = _block_report_fn(command, threat_type, sensor_state, result.reason)
+        earth_report = _block_report_fn(command, report_threat, sensor_state, result.reason)
 
     return ValidationResult(
         verdict="BLOCKED",

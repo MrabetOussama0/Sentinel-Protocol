@@ -390,6 +390,52 @@ def _sensor_window_features(
 
 
 # ---------------------------------------------------------------------------
+# TTH estimation from live sensor state (mirrors physics model formulas)
+# ---------------------------------------------------------------------------
+
+def _estimate_tth(threat_type: str, s: dict) -> float | None:
+    """Estimate time-to-harm in seconds from sensor readings.
+
+    Mirrors the formulas used by the physics models in simulator.py so that
+    classify_sensor_pattern() can call classify_threat() with a real TTH
+    instead of defaulting to YELLOW regardless of urgency.
+
+    Returns None if the required keys are absent.
+    """
+    if threat_type == "cliff_edge":
+        dist  = s.get("distance_m")
+        speed = s.get("drift_speed_ms")
+        if dist is not None and speed and speed > 0:
+            return dist / speed
+    elif threat_type == "dust_storm":
+        od   = s.get("optical_depth", 0.0)
+        wind = s.get("wind_speed_ms", 0.5)
+        dust = s.get("dust_density_gcm3", 0.00001)
+        # rate estimate: next tick projection (simplified)
+        next_od = (dust + 0.0001) * 100 * ((wind + 0.5) ** 0.3)
+        cur_od  = dust * 100 * (wind ** 0.3) if wind > 0 else od
+        rate    = max((next_od - cur_od) / 60.0, 1e-9)
+        return max((1.0 - cur_od) / rate, 0.0)
+    elif threat_type == "battery_critical":
+        charge = s.get("charge_pct")
+        draw   = s.get("draw_pct_per_tick")
+        if charge is not None and draw and draw > 0:
+            return (charge / draw) * 60
+    elif threat_type == "rockfall":
+        dist  = s.get("debris_dist_m")
+        speed = s.get("debris_speed_ms")
+        if dist is not None and speed and speed > 0:
+            return dist / speed
+    elif threat_type == "comms_blackout":
+        elev = s.get("relay_elevation_deg")
+        rate = s.get("effective_descent_rate")
+        if elev is not None and rate and rate > 0:
+            remaining = max(elev - 5.0, 0.0)
+            return max((remaining / rate) * 90.0, 0.0)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Threat type matching from sensor state keys
 # ---------------------------------------------------------------------------
 
@@ -403,16 +449,23 @@ _THREAT_SENSOR_KEYS: dict[str, frozenset[str]] = {
 
 
 def _match_threat_type(sensor_state: dict) -> str | None:
-    """Return the best-matching known threat type from sensor keys, or None."""
+    """Return the best-matching known threat type from sensor keys, or None.
+
+    Requires overlap >= 2 keys (or >= 50% of the signature) to commit to a
+    known threat — prevents a single generic key (e.g. charge_pct) from
+    incorrectly routing an unrelated anomaly into a specific threat path.
+    """
     keys = frozenset(sensor_state.keys())
-    best_threat, best_overlap = None, 0
+    best_threat, best_overlap, best_ratio = None, 0, 0.0
     for threat, sig_keys in _THREAT_SENSOR_KEYS.items():
         overlap = len(keys & sig_keys)
-        if overlap > best_overlap:
+        ratio   = overlap / len(sig_keys)
+        # Must match at least 2 keys AND at least 50% of the threat's signature
+        if overlap >= 2 and ratio >= 0.5 and overlap > best_overlap:
             best_overlap = overlap
+            best_ratio   = ratio
             best_threat  = threat
-    # Require at least one matching key to commit to a known threat
-    return best_threat if best_overlap >= 1 else None
+    return best_threat
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +475,7 @@ def _match_threat_type(sensor_state: dict) -> str | None:
 def classify_sensor_pattern(
     sensor_state: dict,
     window:       SensorWindow | None = None,
+    comm_delay_s: float = 780,
 ) -> AnomalyResult:
     """Score a rover sensor reading dict using the trained IsolationForest.
 
@@ -435,6 +489,10 @@ def classify_sensor_pattern(
         for a valid score.  If None or len < 3, returns GREEN with
         score=0.0 (insufficient baseline — caller should accumulate more
         ticks before acting on the result).
+    comm_delay_s : float
+        One-way comm delay in seconds.  Used to compute the correct tier
+        for matched known threats via classify_threat() rather than
+        defaulting to YELLOW regardless of actual TTH.
 
     Returns
     -------
@@ -442,9 +500,12 @@ def classify_sensor_pattern(
         anomaly_score : float in [0, 1] — 1 = most anomalous
         is_anomaly    : bool
         threat_type   : known threat or "unclassified_anomaly"
-        tier          : DecisionTier (YELLOW for unclassified)
+        tier          : DecisionTier — computed correctly from TTH for known
+                        threats; YELLOW for unclassified (no TTH estimate possible)
         label         : human-readable description
     """
+    from sentinel.decision_engine import classify_threat  # local import avoids circular at module level
+
     # Without a window we have no deviation baseline — cannot make a meaningful
     # anomaly judgment, so default to GREEN (safe / insufficient data).
     if window is None or len(window) < 3:
@@ -484,16 +545,19 @@ def classify_sensor_pattern(
     matched_threat = _match_threat_type(sensor_state)
 
     if matched_threat is not None:
-        # Route through decision_engine as normal (tier computed by caller)
+        # Derive TTH from sensor state using the same logic as the physics models
+        # so that the tier is correctly RED/YELLOW/GREEN rather than always YELLOW.
+        tth = _estimate_tth(matched_threat, sensor_state)
+        tier = classify_threat(matched_threat, tth, comm_delay_s) if tth is not None else DecisionTier.YELLOW
         return AnomalyResult(
             anomaly_score = normalised,
             is_anomaly    = True,
             threat_type   = matched_threat,
-            tier          = DecisionTier.YELLOW,   # caller may override via classify_threat
-            label         = f"anomaly — matched threat: {matched_threat}",
+            tier          = tier,
+            label         = f"anomaly — matched threat: {matched_threat} [{tier.value}]",
         )
     else:
-        # Unknown pattern — default to YELLOW, label "unclassified anomaly"
+        # Unknown pattern — conservative YELLOW: block risky actions, hold, notify Earth
         return AnomalyResult(
             anomaly_score = normalised,
             is_anomaly    = True,
