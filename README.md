@@ -64,6 +64,9 @@ To keep the system focused and demonstrable, Sentinel is built around five repre
 | **Battery critical** | Battery % dropping + no sunlight | Minutes–hours | Reposition to sunlight, enter low-power mode |
 | **Rockfall / debris** | Vibration sensor + camera obstruction spike | Seconds (3–10s) | Halt, shield cameras, wait it out |
 | **Comms blackout** | Signal strength drops to zero (solar interference or terrain) | Unknown duration | Switch to full autonomy: prioritize battery, then safety, then position; queue all logs for Earth |
+| **Unclassified anomaly** ¹ | IsolationForest flags a sensor pattern that doesn't match any known threat | Unknown | Block all non-hold actions; only `stop` / `hold` permitted pending Earth confirmation |
+
+¹ Not a sensor-driven threat type — raised by the anomaly detection layer when a reading is flagged anomalous but doesn't match any of the five known signatures. Handled by the safety gate's unconditional conservative default rather than the decision-time-budget engine.
 
 These five scenarios form the basis for the decision engine, the live scenario simulator, and the demo dashboard described in the sections below.
 
@@ -113,7 +116,29 @@ This gate becomes critical during a **total communications blackout**, when Eart
 
 This means a total loss of contact does not leave the rover paralyzed or blindly reactive — it falls back to a single, consistent decision-making loop that treats every action, self-generated or externally ordered, with the same scrutiny.
 
+### Handling Unrecognized Threats
+
+Not every hazard the rover encounters will match one of its five known threat types. For a genuinely **unclassified anomaly** — a sensor pattern that doesn't fit any known category — Sentinel does not guess at what's safe. Rather than evaluating sensor values against thresholds it doesn't have, the safety gate applies an **unconditional block**: every action beyond simple holding (movement, transmission, antenna deployment, and other higher-risk commands) is blocked outright, and only hold-type actions (`stop`, `hold`, `hold_in_place`, `emergency_full_stop`) are permitted, pending clarification from Earth. This was a deliberate design correction made after testing revealed the opposite default — passing unclassified threats through as safe — was the wrong failure mode: when the nature of a hazard is unknown, the system defaults to maximum caution rather than assuming safety.
+
+### Anomaly Detection (NASA SMAP/MSL)
+
+Sentinel's five threat types cover known, well-defined hazard categories — but not every real-world sensor pattern will fit a category the system was explicitly built to recognize. To handle this, Sentinel includes an anomaly detection layer trained and evaluated on NASA's public **SMAP/MSL Anomaly Detection Dataset**, which contains expert-labeled telemetry from the Soil Moisture Active Passive satellite and the Mars Science Laboratory (Curiosity) rover — 517,764 timesteps across 82 telemetry channels, 12.5% of which are labeled anomalous.
+
+A scikit-learn `IsolationForest` model is trained on channel-level statistical features (anomaly fraction, window length, timing patterns) derived from this data, then evaluated on a held-out set of channels it never saw during training:
+
+| Metric | Result |
+|---|---|
+| Accuracy | 0.691 |
+| Precision (anomalous) | **1.000** |
+| Recall (anomalous) | 0.370 |
+| F1 (anomalous) | 0.541 |
+
+The model achieves **perfect precision — zero false positives** — meaning it never misclassifies a genuinely normal channel as anomalous, at the cost of a more conservative recall that only flags the clearest anomalies. This is a deliberate and appropriate trade-off for a rover safety system: a false alarm wastes time and erodes trust in the system, but a missed anomaly is caught downstream by Sentinel's other layers (the five known threat types and the unclassified-anomaly safety default below) — so the anomaly layer is tuned to be confident, not exhaustive.
+
+At runtime, incoming sensor readings are scored against this model. If a reading is flagged anomalous and matches one of Sentinel's known threat signatures (e.g. rockfall, cliff_edge), it's routed into the standard `classify_threat()` engine as usual. If it's flagged anomalous but doesn't match any known threat, it is classified as an **unclassified anomaly** and handled by the safety gate's conservative default described above — every action beyond holding in place is blocked until Earth can confirm what the anomaly actually is.
+
 ## Live Dashboard
+
 
 Sentinel Protocol includes a standalone **Streamlit dashboard** (`dashboard.py`) that visualizes a scenario run in real time: live sensor readings for the active threat, the current decision tier with clear color coding (green/yellow/red), a live-updating AI-generated mission-log reasoning feed, and a scrolling history of past ticks and decisions. Users select a threat scenario from a dropdown (cliff_edge, dust_storm, battery_critical, rockfall, comms_blackout) and watch it play out tick by tick, mirroring how Sentinel would behave on an actual mission.
 
@@ -121,19 +146,43 @@ Sentinel Protocol includes a standalone **Streamlit dashboard** (`dashboard.py`)
   <img src="assets/dashboard-screenshot.png" alt="Sentinel Protocol dashboard showing live sensor readings, a color-coded decision tier, and an AI-generated reasoning feed" width="680"/>
 </p>
 
-<!-- TODO: replace assets/dashboard-screenshot.png with a real screenshot or GIF of dashboard.py running -->
-
 ## Setup and How to Run
 
 **Requirements:** Python 3.12+, an IBM watsonx.ai account with an active project and API key.
 
-1. Clone this repository.
+**Project structure:**
+```
+sentinel-protocol/
+├── sentinel/                    # Core logic package
+│   ├── decision_engine.py       # classify_threat(), Threat dataclass, THREAT_CONSERVATISM
+│   ├── safety_gate.py           # is_action_safe(), validate_command(), blackout_survival_loop()
+│   ├── reasoning.py             # generate_reasoning() — watsonx / Granite integration
+│   ├── simulator.py             # run_scenario() tick-by-tick scenario generator
+│   └── anomaly.py               # classify_sensor_pattern() — IsolationForest anomaly model
+├── data/
+│   ├── labeled_anomalies.csv    # NASA SMAP/MSL anomaly labels (82 channels, 517,764 timesteps)
+│   └── anomaly_model.joblib     # Pre-trained IsolationForest pipeline — committed to repo,
+│                                #   no re-training needed; loaded lazily on first import
+├── notebooks/
+│   └── sentinel_analysis.ipynb  # Demonstration and validation of the sentinel package
+├── dashboard.py                 # Streamlit live dashboard
+├── .env                         # Your watsonx credentials — NOT committed (see step 3 below)
+├── requirements.txt
+└── assets/                      # Logo, diagrams, dashboard screenshot
+```
+
+**Steps:**
+
+1. Clone this repository: `git clone https://github.com/MrabetOussama0/Sentinel-Protocol.git`
 2. Install dependencies: `pip install -r requirements.txt`
-3. Set your watsonx credentials as environment variables (do **not** hardcode them):
-   - `WATSONX_API_KEY`
-   - `WATSONX_PROJECT_ID`
-4. **Decision engine & simulator:** open `notebooks/sentinel_analysis.ipynb` in JupyterLab to explore the core classification logic, scenario simulations, anomaly detection, and full system walkthrough.
-5. **Live dashboard:** run `streamlit run dashboard.py` and open the local URL it provides in your browser.
+3. Create a `.env` file in the project root with your watsonx credentials (already in `.gitignore` — do **not** hardcode these values anywhere in source):
+   ```
+   WATSONX_API_KEY=your_ibm_cloud_api_key
+   WATSONX_PROJECT_ID=your_watsonx_project_guid
+   ```
+   > **Region note:** the reasoning layer is configured for the `eu-de` (Frankfurt) endpoint. If your watsonx project is in a different region, update `WATSONX_URL` in [`sentinel/reasoning.py`](sentinel/reasoning.py) to match (e.g. `https://us-south.ml.cloud.ibm.com` for Dallas).
+4. **Explore the core logic:** open `notebooks/sentinel_analysis.ipynb` in JupyterLab — it imports directly from the `sentinel` package to demonstrate the decision engine, safety gate, scenario simulator, and anomaly detection layer interactively.
+5. **Run the live dashboard:** from the project root, run `streamlit run dashboard.py` and open the local URL it provides in your browser.
 
 ## Challenge Theme
 
@@ -141,4 +190,4 @@ Advance Space Exploration with AI — August Challenge
 
 ## How IBM Bob Was Used
 
-IBM Bob was used across the full build of Sentinel Protocol's backend in JupyterLab: designing and implementing the `classify_threat()` decision engine and its `Threat` dataclass, building the tick-by-tick scenario simulator that feeds realistic escalating sensor data into the engine, and integrating IBM watsonx.ai's `granite-4-h-small` model to generate the natural-language reasoning layer. Bob proposed the LLM prompt template and API integration approach, surfaced configuration decisions (model selection, endpoint, project ID) for explicit approval rather than assuming defaults, and iterated on the watsonx integration after an initial deprecated-endpoint issue was identified and corrected.
+IBM Bob was used across the full build of Sentinel Protocol's backend: designing and implementing the `classify_threat()` decision engine and its `Threat` dataclass, building the tick-by-tick scenario simulator that feeds realistic escalating sensor data into the engine, and integrating IBM watsonx.ai's `granite-4-h-small` model to generate the natural-language reasoning layer. Bob proposed the LLM prompt template and API integration approach, surfaced configuration decisions (model selection, endpoint, project ID) for explicit approval rather than assuming defaults, and iterated on the watsonx integration after an initial deprecated-endpoint issue was identified and corrected. Bob was also used to refactor the project from a single exploratory notebook into a proper Python package (`sentinel/`), separating the decision engine, safety gate, reasoning layer, and simulator into their own modules, with the notebook reduced to a demonstration and validation layer that imports from the package — the same structure a production codebase would use. Finally, Bob built the anomaly detection layer: loading and cleaning the NASA SMAP/MSL dataset, engineering channel-level statistical features, training and evaluating the IsolationForest model against held-out real telemetry channels, and integrating its output with the existing decision engine and safety gate — including identifying and correcting a safety gap where unclassified anomalies were initially passed through as safe rather than defaulting to a conservative hold.

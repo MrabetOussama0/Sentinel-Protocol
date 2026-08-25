@@ -19,3 +19,8 @@ python-dotenv==1.2.2    # Loads WATSONX_API_KEY and WATSONX_PROJECT_ID from .env
 
 # ── Data handling ─────────────────────────────────────────────────────────────
 pandas==2.3.3           # Tick history table in the dashboard
+
+# ── Anomaly detection ─────────────────────────────────────────────────────────
+numpy==2.0.2            # Numerical arrays (sentinel/anomaly.py feature engineering)
+scikit-learn==1.9.0     # IsolationForest + StandardScaler + Pipeline (anomaly model)
+joblib==1.5.3           # Model serialisation: load/save anomaly_model.joblib
