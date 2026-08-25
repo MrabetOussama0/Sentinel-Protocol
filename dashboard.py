@@ -46,8 +46,32 @@ SENSOR_UNITS = {
 SENSOR_ICONS = {
     "distance_m": "📏", "drift_speed_ms": "💨", "wind_speed_ms": "💨",
     "dust_density_gcm3": "🌫️", "optical_depth": "🌫️", "charge_pct": "🔋",
-    "draw_pct_per_tick": "⚡", "seismic_g": "📳", "debris_dist_m": "🪨",
-    "debris_speed_ms": "💥", "relay_elevation_deg": "📡", "effective_descent_rate": "📉",
+    "battery_pct": "🔋", "draw_pct_per_tick": "⚡", "seismic_g": "📳",
+    "debris_dist_m": "🪨", "debris_speed_ms": "💥",
+    "relay_elevation_deg": "📡", "effective_descent_rate": "📉",
+}
+
+SENSOR_UNITS = {
+    **SENSOR_UNITS,
+    "battery_pct": "%",
+}
+
+# State badge colours and icons
+RS_COLOR = {
+    "MOVING":        "#3b82d4",
+    "HOLDING":       "#ca8a04",
+    "STOPPED":       "#dc2626",
+    "REPOSITIONING": "#7c5cd8",
+    "CHARGING":      "#16a34a",
+    "SURVIVAL":      "#dc2626",
+}
+RS_ICON = {
+    "MOVING":        "🚗",
+    "HOLDING":       "🛑",
+    "STOPPED":       "⛔",
+    "REPOSITIONING": "🔄",
+    "CHARGING":      "⚡",
+    "SURVIVAL":      "🛡️",
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -203,9 +227,69 @@ STORIES = [
         "story_beats": {
             0: "Relay at 80°. GREEN tier — full contact.",
             1: "Earth sends 'run_diagnostics' — approved while GREEN.",
-            4: "YELLOW tier — relay descending, holdng and monitoring.",
+            4: "YELLOW tier — relay descending, holding and monitoring.",
             12: "YELLOW — relay at 62°, descent accelerating.",
             13: "RED — relay below threshold. Blackout imminent. Survival mode.",
+        },
+    },
+    # ── NEW: stays YELLOW, never reaches RED ─────────────────────────────
+    {
+        "id": "dust_storm_yellow_hold",
+        "icon": "🟡☁️",
+        "title": "Dust Storm — Holds at YELLOW, Never RED",
+        "subtitle": "GREEN → YELLOW only · Storm subsides · Earth responds in time",
+        "description": (
+            "A gentle, slow-building dust storm raises concern but the communication "
+            "delay to Earth is short enough that TTH never drops below RTT. "
+            "The rover never needs to act autonomously — it holds at YELLOW, "
+            "Earth responds, and the storm eventually passes. "
+            "This scenario shows the tier progression is NOT always GREEN→YELLOW→RED."
+        ),
+        "threat": "dust_storm_slow",
+        "comm_delay_s": 2500,  # Earth far away — TTH never drops below RTT, stays YELLOW
+        "ticks": 25,
+        "tick_delay": 0.5,
+        "earth_cmd_at_tick": 8,
+        "earth_cmd": "hold_position",
+        "story_beats": {
+            0:  "Trace dust, light breeze. GREEN — science ops continue.",
+            4:  "Wind building gradually. Still GREEN.",
+            5:  "YELLOW threshold reached — repositioning to shelter, Earth notified.",
+            8:  "Earth responds (within budget window): 'hold_position' sent.",
+            9:  "Safety gate approves — wind below structural limit. Rover holds.",
+            15: "Storm still YELLOW — rover maintaining safe hold position.",
+            24: "Scenario ends at YELLOW. No autonomous RED action needed.",
+        },
+    },
+    # ── NEW: full blackout — no Earth contact, rover self-manages ─────────
+    {
+        "id": "full_blackout_survival",
+        "icon": "🌑🤖",
+        "title": "Full Blackout — Rover Self-Manages Until Contact Returns",
+        "subtitle": "No Earth contact · Dust + battery + cliff · Autonomous survival",
+        "description": (
+            "The relay satellite went below the horizon BEFORE this scenario starts — "
+            "there is no Earth contact from tick 0. The rover faces rising dust, "
+            "a draining battery, and a cliff ahead, all simultaneously. "
+            "With no commands possible, it stops, shields against dust, conserves "
+            "power, holds its position, and waits for a rescue relay to rise "
+            "over the horizon at tick ~14. This is pure autonomous survival."
+        ),
+        "threat": "full_blackout",
+        "comm_delay_s": 780,
+        "ticks": 22,
+        "tick_delay": 0.7,
+        "earth_cmd_at_tick": None,
+        "earth_cmd": None,
+        "story_beats": {
+            0:  "Relay below horizon — BLACKOUT. No Earth contact. Survival mode begins.",
+            2:  "Battery draining. Dust rising. Cliff 180 m ahead. Holding position.",
+            5:  "Non-essential systems powered down. Wind 5 m/s and climbing.",
+            8:  "Battery at ~48%. Wind 7.4 m/s. Instruments stowed. Still holding.",
+            10: "Wind 9 m/s. Battery 40%. Dust shields deployed. Awaiting relay.",
+            14: "Rescue relay rising over horizon. Contact window approaching.",
+            17: "Relay at 6°. Battery 28%. Attempting to queue transmission.",
+            21: "Relay re-established. Survival logs transmitted. Rover safe.",
         },
     },
 ]
@@ -260,6 +344,30 @@ def _tier_big_html(tier_val: str, action_line: str, holding: str | None = None) 
         f'{hold_line}</div>'
     )
 
+def _robot_status_html(robot_state: str, robot_activity: str,
+                        prev_state: str | None = None) -> str:
+    c   = RS_COLOR.get(robot_state, "#57606a")
+    ico = RS_ICON.get(robot_state, "🤖")
+    changed = prev_state is not None and prev_state != robot_state
+    border  = f"2px solid {c}" if not changed else f"3px solid {c}"
+    badge_bg = c + "22"
+    change_note = (
+        f'<div style="font-size:0.72rem;color:{c};margin-top:4px;font-weight:600;">'
+        f'◀ Changed from {prev_state}</div>'
+        if changed else ""
+    )
+    return (
+        f'<div style="background:#fff;{border};border-radius:12px;padding:14px 18px;margin-bottom:10px;">'
+        f'<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+        f'<div style="background:{badge_bg};border-radius:8px;padding:6px 14px;'
+        f'font-size:0.85rem;font-weight:800;color:{c};letter-spacing:0.05em;">'
+        f'{ico}&nbsp; {robot_state}</div>'
+        f'<div style="font-size:0.72rem;color:#57606a;margin-left:auto;">Rover Status</div>'
+        f'</div>'
+        f'<div style="font-size:0.9rem;color:#1f2328;line-height:1.5;">{robot_activity}</div>'
+        f'{change_note}</div>'
+    )
+
 def _sensor_card_html(key: str, val, unit: str) -> str:
     icon = SENSOR_ICONS.get(key, "📊")
     label = key.replace("_", " ").title()
@@ -280,10 +388,15 @@ def _event_pill(color: str, text: str) -> str:
     )
 
 def _log_entry_html(tick: int, tier: str, source: str, text: str,
-                    cmd_verdict: str = "", cmd: str = "", beat: str = "") -> str:
+                    cmd_verdict: str = "", cmd: str = "", beat: str = "",
+                    robot_state: str = "") -> str:
     c, b = TC[tier], BG[tier]
     src_icons = {"EMERGENCY": "🚨", "AUTONOMOUS": "🤖", "EARTH": "📡", "IDLE": "💤", "": ""}
     pills = f'<div style="margin-top:4px;">'
+    if robot_state:
+        rs_c = RS_COLOR.get(robot_state, "#57606a")
+        rs_i = RS_ICON.get(robot_state, "🤖")
+        pills += _event_pill(rs_c, f"{rs_i} {robot_state}")
     if cmd_verdict == "APPROVED":
         pills += _event_pill("#16a34a", f"✅ Earth cmd: {cmd}")
     elif cmd_verdict == "BLOCKED":
@@ -496,6 +609,7 @@ if st.session_state.running and ptr < len(all_ticks):
         "ratio": ratio, "sensors": ts.sensors,
         "holding": ts.holding_action, "ai": ai_text, "beat": beat,
         "cmd_verdict": cmd_verdict, "cmd_text": cmd_text, "cmd_report": cmd_report,
+        "robot_state": ts.robot_state, "robot_activity": ts.robot_activity,
     })
     st.session_state.history_rows.append({
         "Tick": ptr, "Tier": f"{IC[tv]} {tv}",
@@ -548,6 +662,21 @@ st.markdown(
 # ── Progress bar ─────────────────────────────────────────────────────────────
 prog_label = "✅ Complete" if complete else f"▶ Tick {n_done} / {total_ticks}"
 st.progress(n_done / total_ticks, text=prog_label)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ROVER STATUS CARD — what is the robot doing RIGHT NOW
+# ─────────────────────────────────────────────────────────────────────────────
+robot_state    = latest.get("robot_state", "MOVING")
+robot_activity = latest.get("robot_activity", "")
+prev_robot_state = (
+    st.session_state.log_feed[-2].get("robot_state")
+    if len(st.session_state.log_feed) > 1 else None
+)
+st.markdown("#### 🤖 Rover Status — What is the robot doing right now?")
+st.markdown(
+    _robot_status_html(robot_state, robot_activity, prev_robot_state),
+    unsafe_allow_html=True,
+)
 
 st.markdown("---")
 
@@ -646,13 +775,14 @@ with log_col:
                ("AUTONOMOUS" if entry["holding"] else "IDLE"))
         st.markdown(
             _log_entry_html(
-                tick       = entry["tick"],
-                tier       = entry["tier"],
-                source     = src,
-                text       = entry["ai"],
-                cmd_verdict= entry["cmd_verdict"],
-                cmd        = entry["cmd_text"],
-                beat       = entry["beat"],
+                tick         = entry["tick"],
+                tier         = entry["tier"],
+                source       = src,
+                text         = entry["ai"],
+                cmd_verdict  = entry["cmd_verdict"],
+                cmd          = entry["cmd_text"],
+                beat         = entry["beat"],
+                robot_state  = entry.get("robot_state", ""),
             ),
             unsafe_allow_html=True,
         )
