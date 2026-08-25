@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/logo.svg" alt="Sentinel Protocol logo" width="500"/>
+  <img src="assets/logo.jpeg" alt="Sentinel Protocol logo" width="500"/>
 </p>
 
 <p align="center">
@@ -237,7 +237,7 @@ Sentinel Protocol/
 │   ├── labeled_anomalies.csv         ← NASA SMAP/MSL anomaly labels (82 channels)
 │   └── anomaly_model.joblib          ← Pre-trained IsolationForest — no retraining needed
 ├── assets/
-│   ├── logo.svg
+│   ├── logo.jpeg
 │   ├── architecture-diagram.png
 │   └── dashboard-screenshot.png
 ├── dashboard.py                      ← Streamlit mission-control dashboard (pure UI layer)
