@@ -901,11 +901,14 @@ with st.expander("🔍 Safety Gate Probe — Test Any Action vs. Any Threat", ex
         probe_action = st.selectbox(
             "Action", ALL_COMMANDS + ["emergency_full_stop", "cut_motors"], key="probe_action"
         )
+        # Map display-only threat types to their canonical safety-gate equivalent
+        _PROBE_ALIAS = {"dust_storm_slow": "dust_storm", "full_blackout": "comms_blackout"}
+        probe_default = _PROBE_ALIAS.get(threat, threat)
         probe_threats = st.multiselect(
             "Active threats",
             ["cliff_edge", "dust_storm", "battery_critical",
              "rockfall", "comms_blackout", "unclassified_anomaly"],
-            default=[threat], key="probe_threats",
+            default=[probe_default], key="probe_threats",
         )
     with pg2:
         p_dist   = st.number_input("distance_m",    0.0, 5000.0, 50.0,  key="p_dist")
