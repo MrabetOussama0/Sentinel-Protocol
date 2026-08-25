@@ -9,6 +9,8 @@ sentinel.decision_engine  — DecisionTier, Threat, classify_threat(), THREAT_CO
 sentinel.simulator        — TickState, run_scenario(), choose_holding_action()
 sentinel.safety_gate      — is_action_safe(), validate_command(), blackout_survival_loop()
 sentinel.reasoning        — generate_reasoning(), make_block_report()
+sentinel.anomaly          — AnomalyResult, SensorWindow, classify_sensor_pattern(),
+                            train_and_save(), load_model(), evaluate()
 """
 
 from sentinel.decision_engine import (
@@ -32,6 +34,14 @@ from sentinel.safety_gate import (
     blackout_survival_loop,
 )
 from sentinel.reasoning import generate_reasoning, make_block_report
+from sentinel.anomaly import (
+    AnomalyResult,
+    SensorWindow,
+    classify_sensor_pattern,
+    train_and_save,
+    load_model,
+    evaluate,
+)
 
 __all__ = [
     "DecisionTier", "Threat", "ThreatType", "THREAT_CONSERVATISM", "classify_threat",
@@ -39,4 +49,6 @@ __all__ = [
     "SafetyCheckResult", "ValidationResult", "SurvivalStep",
     "is_action_safe", "validate_command", "blackout_survival_loop",
     "generate_reasoning", "make_block_report",
+    "AnomalyResult", "SensorWindow", "classify_sensor_pattern",
+    "train_and_save", "load_model", "evaluate",
 ]
