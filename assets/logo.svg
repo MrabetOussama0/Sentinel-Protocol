@@ -1,0 +1,30 @@
+<svg width="640" height="160" viewBox="0 0 640 160" xmlns="http://www.w3.org/2000/svg" role="img">
+<title>Sentinel Protocol logo</title>
+<desc>A hexagonal shield-and-signal mark beside the wordmark "Sentinel Protocol"</desc>
+<defs>
+<style>
+  .bg { fill: #0C1420; }
+  .shield { fill: #E6F1FB; }
+  .ring { fill: none; stroke: #1D9E75; stroke-width: 3; }
+  .dot { fill: #1D9E75; }
+  .wordmark { font-family: 'Segoe UI', Arial, sans-serif; font-weight: 700; fill: #F1EFE8; }
+  .sub { font-family: 'Segoe UI', Arial, sans-serif; font-weight: 400; fill: #888780; letter-spacing: 2px; }
+</style>
+</defs>
+
+<rect x="0" y="0" width="640" height="160" class="bg" rx="16"/>
+
+<!-- Hexagon shield mark -->
+<g transform="translate(80,80)">
+  <polygon points="0,-46 40,-23 40,23 0,46 -40,23 -40,-23" fill="#0F6E56" stroke="#1D9E75" stroke-width="2"/>
+  <polygon points="0,-30 26,-15 26,15 0,30 -26,15 -26,-15" class="shield" opacity="0.95"/>
+  <!-- signal arcs (comm / radar motif) -->
+  <path d="M -14 6 A 16 16 0 0 1 14 6" fill="none" stroke="#0F6E56" stroke-width="3" stroke-linecap="round"/>
+  <path d="M -20 12 A 24 24 0 0 1 20 12" fill="none" stroke="#0F6E56" stroke-width="2.5" stroke-linecap="round" opacity="0.6"/>
+  <circle cx="0" cy="6" r="3.5" fill="#0F6E56"/>
+</g>
+
+<!-- Wordmark -->
+<text x="150" y="80" font-size="40" class="wordmark">Sentinel Protocol</text>
+<text x="152" y="106" font-size="14" class="sub">AUTONOMOUS DECISION AI FOR SPACE MISSIONS</text>
+</svg>
