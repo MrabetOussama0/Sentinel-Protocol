@@ -86,7 +86,12 @@ def _cliff_edge_model(ticks: int):
 
 
 def _dust_storm_model(ticks: int):
-    wind_ms, dust_gcm3, wind_ramp, dust_ramp, tick_dur_s = 4.0, 0.001, 2.5, 0.004, 60
+    # Slow-build storm: starts as a light breeze with trace dust; optical depth
+    # rises steadily over ~16 ticks before panels are critically obscured.
+    # Panel shutdown threshold raised to 1.0 optical-depth units (unchanged) but
+    # initial wind and dust are now much lower so the approach is gradual.
+    # Produces: GREEN ticks 0-3, YELLOW ticks 4-15, RED tick 16+  (RTT=1560 s).
+    wind_ms, dust_gcm3, wind_ramp, dust_ramp, tick_dur_s = 0.5, 0.00001, 0.5, 0.0001, 60
     for _ in range(ticks):
         optical_depth = dust_gcm3 * 100 * (wind_ms ** 0.3)
         next_od = (dust_gcm3 + dust_ramp) * 100 * ((wind_ms + wind_ramp) ** 0.3)
@@ -94,7 +99,7 @@ def _dust_storm_model(ticks: int):
         tth     = max((1.0 - optical_depth) / od_rate, 0.0)
         yield (
             {"wind_speed_ms": round(wind_ms, 2),
-             "dust_density_gcm3": round(dust_gcm3, 4),
+             "dust_density_gcm3": round(dust_gcm3, 5),
              "optical_depth": round(optical_depth, 4)},
             tth,
         )
@@ -103,7 +108,11 @@ def _dust_storm_model(ticks: int):
 
 
 def _battery_critical_model(ticks: int):
-    charge_pct, draw, draw_accel, tick_dur_s = 18.0, 0.8, 0.12, 60
+    # Slow drain scenario: battery starts at 30 %, draw rate begins at 0.3 %/tick
+    # and accelerates gradually.  Provides a clean multi-tick GREEN → YELLOW → RED
+    # progression rather than starting already in RED.
+    # Produces: GREEN ticks 0-1, YELLOW ticks 2-6, RED tick 7+  (RTT=1560 s).
+    charge_pct, draw, draw_accel, tick_dur_s = 30.0, 0.3, 0.05, 60
     for _ in range(ticks):
         tth = (charge_pct / draw) * tick_dur_s
         yield ({"charge_pct": round(charge_pct, 2), "draw_pct_per_tick": round(draw, 3)}, tth)
@@ -112,14 +121,17 @@ def _battery_critical_model(ticks: int):
 
 
 def _rockfall_model(ticks: int):
-    seismic_g, debris_dist_m, debris_speed = 0.05, 80.0, 1.5
-    seismic_ramp, speed_ramp, tick_dur_s   = 0.08, 2.0, 5
+    # Distant seismic event: debris starts 2500 m away, rolling slowly.
+    # Speed increases each tick as debris accelerates under gravity.
+    # Produces: GREEN ticks 0-3, YELLOW ticks 4-8, RED tick 9+  (RTT=1560 s).
+    seismic_g, debris_dist_m, debris_speed = 0.02, 2500.0, 0.2
+    seismic_ramp, speed_ramp, tick_dur_s   = 0.02, 0.10, 10
     for _ in range(ticks):
         tth = debris_dist_m / debris_speed if debris_speed > 0 else float("inf")
         yield (
             {"seismic_g": round(seismic_g, 3),
-             "debris_dist_m": round(debris_dist_m, 2),
-             "debris_speed_ms": round(debris_speed, 2)},
+             "debris_dist_m": round(debris_dist_m, 1),
+             "debris_speed_ms": round(debris_speed, 3)},
             tth,
         )
         debris_dist_m = max(0.0, debris_dist_m - debris_speed * tick_dur_s)
@@ -128,10 +140,13 @@ def _rockfall_model(ticks: int):
 
 
 def _comms_blackout_model(ticks: int):
-    elevation_deg, descent_rate, tick_dur_s = 42.0, 1.8, 60
+    # Satellite starts high (80°), descends at 1.5°/tick with increasing rate
+    # as orbital geometry compresses near the horizon.
+    # Produces: GREEN ticks 0-3, YELLOW ticks 4-12, RED tick 13+  (RTT=1560 s).
+    elevation_deg, descent_rate, tick_dur_s = 80.0, 1.5, 90
     for _ in range(ticks):
         remaining_deg = max(elevation_deg - 5.0, 0.0)
-        eff_rate      = descent_rate * (1 + 0.04 * (42.0 - elevation_deg))
+        eff_rate      = descent_rate * (1 + 0.06 * (80.0 - elevation_deg))
         tth           = max((remaining_deg / eff_rate) * tick_dur_s, 0.0)
         yield (
             {"relay_elevation_deg": round(elevation_deg, 2),
