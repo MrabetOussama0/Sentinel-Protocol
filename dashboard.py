@@ -11,15 +11,9 @@ via st.rerun() at the very bottom.  time.sleep() is called only after all
 widgets are painted so the browser always shows a complete frame.
 """
 
-import os
 import time
-import math
-from dataclasses import dataclass
-from enum import Enum
-from typing import Iterator, Literal, NamedTuple
 
 import streamlit as st
-from dotenv import load_dotenv
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Page config  (must be the first Streamlit call)
@@ -32,227 +26,13 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core engine — tiers, dataclass, classify_threat()
+# sentinel package imports
 # ─────────────────────────────────────────────────────────────────────────────
 
-class DecisionTier(Enum):
-    GREEN  = "GREEN"
-    YELLOW = "YELLOW"
-    RED    = "RED"
-
-@dataclass
-class Threat:
-    threat_type:    str
-    time_to_harm_s: float
-    comm_delay_s:   float
-
-    @property
-    def round_trip_s(self) -> float:
-        return self.comm_delay_s * 2
-
-    @property
-    def time_margin_ratio(self) -> float:
-        if self.round_trip_s == 0:
-            return float("inf")
-        return self.time_to_harm_s / self.round_trip_s
-
-THREAT_CONSERVATISM: dict[str, float] = {
-    "cliff_edge":       0.80,
-    "dust_storm":       0.90,
-    "battery_critical": 0.95,
-    "rockfall":         0.70,
-    "comms_blackout":   1.00,
-}
-
-def classify_threat(threat_type: str, time_to_harm_s: float, comm_delay_s: float) -> DecisionTier:
-    conservatism = THREAT_CONSERVATISM[threat_type]
-    threat = Threat(
-        threat_type    = threat_type,
-        time_to_harm_s = time_to_harm_s * conservatism,
-        comm_delay_s   = comm_delay_s,
-    )
-    ratio = threat.time_margin_ratio
-    if ratio > 2.0:
-        return DecisionTier.GREEN
-    elif ratio > 1.0:
-        return DecisionTier.YELLOW
-    else:
-        return DecisionTier.RED
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Scenario simulator
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TickState(NamedTuple):
-    tick:           int
-    sensors:        dict
-    time_to_harm_s: float
-    tier:           DecisionTier
-    holding_action: str | None  # 'hold_in_place' | 'reposition_to_safety' | None
-
-def _cliff_edge_model(ticks: int):
-    distance_m, speed_ms, accel, tick_dur_s = 100.0, 0.02, 0.003, 30
-    for _ in range(ticks):
-        tth = distance_m / speed_ms if speed_ms > 0 else float("inf")
-        yield ({"distance_m": round(distance_m, 3), "drift_speed_ms": round(speed_ms, 4)}, tth)
-        distance_m = max(0.0, distance_m - speed_ms * tick_dur_s)
-        speed_ms  += accel
-
-def _dust_storm_model(ticks: int):
-    wind_ms, dust_gcm3, wind_ramp, dust_ramp, tick_dur_s = 4.0, 0.001, 2.5, 0.004, 60
-    for _ in range(ticks):
-        optical_depth = dust_gcm3 * 100 * (wind_ms ** 0.3)
-        next_od = (dust_gcm3 + dust_ramp) * 100 * ((wind_ms + wind_ramp) ** 0.3)
-        od_rate = max((next_od - optical_depth) / tick_dur_s, 1e-9)
-        tth     = max((1.0 - optical_depth) / od_rate, 0.0)
-        yield ({"wind_speed_ms": round(wind_ms, 2),
-                "dust_density_gcm3": round(dust_gcm3, 4),
-                "optical_depth": round(optical_depth, 4)}, tth)
-        wind_ms   += wind_ramp
-        dust_gcm3 += dust_ramp
-
-def _battery_critical_model(ticks: int):
-    charge_pct, draw, draw_accel, tick_dur_s = 18.0, 0.8, 0.12, 60
-    for _ in range(ticks):
-        tth = (charge_pct / draw) * tick_dur_s
-        yield ({"charge_pct": round(charge_pct, 2), "draw_pct_per_tick": round(draw, 3)}, tth)
-        charge_pct = max(0.0, charge_pct - draw)
-        draw      += draw_accel
-
-def _rockfall_model(ticks: int):
-    seismic_g, debris_dist_m, debris_speed = 0.05, 80.0, 1.5
-    seismic_ramp, speed_ramp, tick_dur_s   = 0.08, 2.0, 5
-    for _ in range(ticks):
-        tth = debris_dist_m / debris_speed if debris_speed > 0 else float("inf")
-        yield ({"seismic_g": round(seismic_g, 3),
-                "debris_dist_m": round(debris_dist_m, 2),
-                "debris_speed_ms": round(debris_speed, 2)}, tth)
-        debris_dist_m = max(0.0, debris_dist_m - debris_speed * tick_dur_s)
-        debris_speed += speed_ramp
-        seismic_g    += seismic_ramp
-
-def _comms_blackout_model(ticks: int):
-    elevation_deg, descent_rate, tick_dur_s = 42.0, 1.8, 60
-    for _ in range(ticks):
-        remaining_deg = max(elevation_deg - 5.0, 0.0)
-        eff_rate      = descent_rate * (1 + 0.04 * (42.0 - elevation_deg))
-        tth           = max((remaining_deg / eff_rate) * tick_dur_s, 0.0)
-        yield ({"relay_elevation_deg": round(elevation_deg, 2),
-                "effective_descent_rate": round(eff_rate, 3)}, tth)
-        elevation_deg = max(0.0, elevation_deg - descent_rate)
-
-_MODELS = {
-    "cliff_edge":       _cliff_edge_model,
-    "dust_storm":       _dust_storm_model,
-    "battery_critical": _battery_critical_model,
-    "rockfall":         _rockfall_model,
-    "comms_blackout":   _comms_blackout_model,
-}
-
-# Sensor thresholds used by choose_holding_action
-_REPOSITION_UNSAFE_WIND_MS = 20.0
-_REPOSITION_UNSAFE_CHARGE  =  5.0
-
-def choose_holding_action(threat_type: str, sensor_state: dict,
-                           comm_delay_s: float = 780) -> str:
-    """Return 'hold_in_place' or 'reposition_to_safety' for a YELLOW-tier tick."""
-    if threat_type == "cliff_edge":
-        return "hold_in_place"
-    if threat_type == "dust_storm":
-        return "hold_in_place" if sensor_state.get("wind_speed_ms", 0) >= _REPOSITION_UNSAFE_WIND_MS else "reposition_to_safety"
-    if threat_type == "battery_critical":
-        return "hold_in_place" if sensor_state.get("charge_pct", 100) <= _REPOSITION_UNSAFE_CHARGE else "reposition_to_safety"
-    if threat_type in ("rockfall", "comms_blackout"):
-        return "hold_in_place"
-    return "hold_in_place"
-
-def run_scenario(threat_type: str, ticks: int, comm_delay_s: float) -> list[TickState]:
-    """Pre-compute all ticks into a list (Streamlit-friendly — no generator in session state)."""
-    results = []
-    for i, (sensors, tth) in enumerate(_MODELS[threat_type](ticks)):
-        tier = classify_threat(threat_type, tth, comm_delay_s)
-        ha   = choose_holding_action(threat_type, sensors, comm_delay_s) if tier == DecisionTier.YELLOW else None
-        results.append(TickState(tick=i, sensors=sensors,
-                                 time_to_harm_s=round(tth, 1), tier=tier,
-                                 holding_action=ha))
-    return results
-
-# ─────────────────────────────────────────────────────────────────────────────
-# watsonx.ai — generate_reasoning()
-# ─────────────────────────────────────────────────────────────────────────────
-
-load_dotenv()
-
-_WATSONX_READY = False
-_wx_model      = None
-
-def _init_watsonx() -> bool:
-    global _wx_model, _WATSONX_READY
-    if _WATSONX_READY:
-        return True
-    api_key    = os.environ.get("WATSONX_API_KEY", "")
-    project_id = os.environ.get("WATSONX_PROJECT_ID", "")
-    if not api_key or "your_ibm_cloud" in api_key:
-        return False
-    try:
-        from ibm_watsonx_ai import Credentials
-        from ibm_watsonx_ai.foundation_models import ModelInference
-        _wx_model = ModelInference(
-            model_id    = "ibm/granite-4-h-small",
-            credentials = Credentials(url="https://eu-de.ml.cloud.ibm.com", api_key=api_key),
-            project_id  = project_id,
-        )
-        _WATSONX_READY = True
-        return True
-    except Exception:
-        return False
-
-_SYSTEM_PROMPT = (
-    "You are the autonomous reasoning system of a planetary rover named Sentinel. "
-    "Write a single professional mission-log sentence (maximum 40 words) explaining "
-    "the decision made. Be factual, precise, and terse — like a flight engineer "
-    "writing a flight log entry. Output only the log sentence, nothing else."
-)
-
-_USER_TEMPLATE = (
-    "SITUATION:\n"
-    "  Threat      : {threat_type}\n"
-    "  Sensor data : {sensors}\n"
-    "  Time-to-harm: {time_to_harm_s:.1f} s\n"
-    "  Round-trip comm delay: {round_trip_s:.0f} s\n"
-    "  Adjusted ratio (TTH/RTT): {ratio:.3f}\n"
-    "  Decision tier: {tier}\n"
-    "  Required action: {action}\n"
-    "\nWrite the mission log entry for this tick."
-)
-
-@st.cache_data(show_spinner=False)
-def generate_reasoning(threat_type: str, sensors_repr: str, time_to_harm_s: float,
-                       round_trip_s: float, ratio: float, tier_val: str, action: str) -> str:
-    """Cached per unique (tick inputs) — API called once per tick, never on reruns."""
-    if not _init_watsonx():
-        return "(watsonx not configured — check .env credentials)"
-    tick_data = {
-        "threat_type":    threat_type,
-        "sensors":        sensors_repr,
-        "time_to_harm_s": time_to_harm_s,
-        "round_trip_s":   round_trip_s,
-        "ratio":          ratio,
-        "tier":           tier_val,
-        "action":         action,
-    }
-    try:
-        messages = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": _USER_TEMPLATE.format(**tick_data)},
-        ]
-        resp = _wx_model.chat(
-            messages=messages,
-            params={"max_tokens": 80, "temperature": 0.3, "repetition_penalty": 1.05},
-        )
-        return resp["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"(model error: {e})"
+from sentinel.decision_engine import DecisionTier, THREAT_CONSERVATISM
+from sentinel.simulator import TickState, run_scenario, choose_holding_action
+from sentinel.safety_gate import validate_command, ValidationResult
+from sentinel.reasoning import generate_reasoning, make_block_report
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Lookup tables — string keys only (enum-class-reload-safe)
@@ -332,126 +112,23 @@ def _ratio_bar_html(ratio: float) -> str:
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Command validation — validate_command() + block-report generator
+# Cached generate_reasoning wrapper
+# (sentinel.reasoning.generate_reasoning takes a dict; we cache it via st.cache_data)
 # ─────────────────────────────────────────────────────────────────────────────
 
-_ADVANCE_CMDS  = frozenset({"move_forward", "continue_heading", "increase_speed",
-                             "resume_traverse", "proceed", "advance"})
-_ANTENNA_CMDS  = frozenset({"deploy_antenna", "raise_antenna", "extend_mast",
-                             "open_solar_panel", "deploy_instrument"})
-_HIGH_PWR_CMDS = frozenset({"deploy_antenna", "raise_antenna", "transmit_data",
-                             "queue_transmission", "activate_drill", "run_diagnostics",
-                             "enable_heaters", "full_sensor_sweep"})
-_MOVEMENT_CMDS = frozenset({"move_forward", "continue_heading", "increase_speed",
-                             "resume_traverse", "proceed", "advance",
-                             "move_backward", "reverse", "turn_left", "turn_right",
-                             "change_heading", "reposition"})
-_COMMS_CMDS    = frozenset({"transmit_data", "queue_transmission", "send_telemetry",
-                             "uplink_report", "broadcast_status"})
-
-_BLOCK_SYSTEM = (
-    "You are the autonomous safety system of a planetary rover named Sentinel. "
-    "A command from Earth has been blocked because it conflicts with an active hazard. "
-    "Write a single professional sentence (maximum 45 words) reporting the block back to Earth. "
-    "Be factual and terse — like a flight engineer writing a status update. "
-    "Output only the sentence, nothing else."
-)
-_BLOCK_USER = (
-    "Blocked command : {command}\n"
-    "Active threat   : {threat_type}\n"
-    "Sensor state    : {sensors}\n"
-    "Conflict reason : {reason}\n\n"
-    "Write the status report back to Earth."
-)
-
-def _block_report(command: str, threat_type: str, sensors: dict, reason: str) -> str:
-    if not _init_watsonx():
-        return "(watsonx not configured — check .env credentials)"
-    try:
-        resp = _wx_model.chat(
-            messages=[
-                {"role": "system", "content": _BLOCK_SYSTEM},
-                {"role": "user",   "content": _BLOCK_USER.format(
-                    command=command, threat_type=threat_type,
-                    sensors=str(sensors), reason=reason)},
-            ],
-            params={"max_tokens": 90, "temperature": 0.3, "repetition_penalty": 1.05},
-        )
-        return resp["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        return f"(model error: {e})"
-
-
-def validate_command(command: str, sensor_state: dict,
-                     threat_type: str | None = None,
-                     comm_delay_s: float = 780) -> dict:
-    """Validate an Earth command against current sensor state.
-
-    Returns a dict with keys: verdict ('APPROVED'|'BLOCKED'), command,
-    reason (str), earth_report (str).
-    """
-    cmd = command.strip().lower()
-
-    def _approved():
-        return {"verdict": "APPROVED", "command": command, "reason": "", "earth_report": ""}
-
-    if not threat_type:
-        return _approved()
-
-    # cliff_edge — block advance commands when adj TTH <= RTT
-    if threat_type == "cliff_edge" and cmd in _ADVANCE_CMDS:
-        dist  = sensor_state.get("distance_m", float("inf"))
-        speed = sensor_state.get("drift_speed_ms", 0.0)
-        if speed > 0:
-            tth_adj = (dist / speed) * THREAT_CONSERVATISM["cliff_edge"]
-            rtt     = comm_delay_s * 2
-            if tth_adj <= rtt:
-                reason = (f"cliff edge {dist:.1f} m ahead; "
-                          f"adj. time-to-edge {tth_adj:.0f} s ≤ round-trip {rtt:.0f} s")
-                return {"verdict": "BLOCKED", "command": command, "reason": reason,
-                        "earth_report": _block_report(command, threat_type, sensor_state, reason)}
-
-    # dust_storm — block structural deployments when wind/opacity high
-    if threat_type == "dust_storm" and cmd in _ANTENNA_CMDS:
-        wind  = sensor_state.get("wind_speed_ms", 0.0)
-        opdep = sensor_state.get("optical_depth", 0.0)
-        if wind >= 15.0:
-            reason = f"wind {wind:.1f} m/s exceeds structural safety limit (15 m/s)"
-            return {"verdict": "BLOCKED", "command": command, "reason": reason,
-                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
-        if opdep >= 0.6:
-            reason = f"dust optical depth {opdep:.3f} ≥ 0.60 — particulate ingestion risk"
-            return {"verdict": "BLOCKED", "command": command, "reason": reason,
-                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
-
-    # battery_critical — block high-power commands when charge critically low
-    if threat_type == "battery_critical" and cmd in _HIGH_PWR_CMDS:
-        charge = sensor_state.get("charge_pct", 100.0)
-        if charge <= 10.0:
-            reason = f"battery at {charge:.1f}% — high-power command risks full shutdown"
-            return {"verdict": "BLOCKED", "command": command, "reason": reason,
-                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
-
-    # rockfall — block any movement when debris ETA ≤ 30 s
-    if threat_type == "rockfall" and cmd in _MOVEMENT_CMDS:
-        dist  = sensor_state.get("debris_dist_m", float("inf"))
-        speed = sensor_state.get("debris_speed_ms", 0.0)
-        if speed > 0 and (dist / speed) <= 30.0:
-            eta    = dist / speed
-            reason = f"debris {dist:.1f} m at {speed:.1f} m/s — impact ETA {eta:.1f} s"
-            return {"verdict": "BLOCKED", "command": command, "reason": reason,
-                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
-
-    # comms_blackout — block transmission commands when satellite below cutoff
-    if threat_type == "comms_blackout" and cmd in _COMMS_CMDS:
-        elev = sensor_state.get("relay_elevation_deg", 90.0)
-        if elev <= 8.0:
-            reason = f"relay at {elev:.1f}° (cutoff 8°) — transmission would fail"
-            return {"verdict": "BLOCKED", "command": command, "reason": reason,
-                    "earth_report": _block_report(command, threat_type, sensor_state, reason)}
-
-    return _approved()
-
+@st.cache_data(show_spinner=False)
+def _cached_reasoning(threat_type: str, sensors_repr: str, time_to_harm_s: float,
+                      round_trip_s: float, ratio: float, tier_val: str, action: str) -> str:
+    """Cached per unique (tick inputs) — API called once per tick, never on reruns."""
+    return generate_reasoning({
+        "threat_type":    threat_type,
+        "sensors":        sensors_repr,
+        "time_to_harm_s": time_to_harm_s,
+        "round_trip_s":   round_trip_s,
+        "ratio":          ratio,
+        "tier":           tier_val,
+        "action":         action,
+    })
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session-state initialisation
@@ -526,7 +203,8 @@ if reset_btn:
 
 if start_btn:
     _reset_sim()
-    st.session_state.ticks_data = run_scenario(scenario, ticks=n_ticks, comm_delay_s=comm_delay)
+    # run_scenario is a generator — materialise it into a list for session state
+    st.session_state.ticks_data = list(run_scenario(scenario, ticks=n_ticks, comm_delay_s=comm_delay))
     st.session_state.running    = True
     st.session_state.tick_ptr   = 0
     # Don't rerun here — fall through so the header renders before any tick work
@@ -573,7 +251,7 @@ if st.session_state.running and ptr < len(all_ticks):
     ratio        = adj_tth / round_trip_s if round_trip_s > 0 else float("inf")
 
     if ai_on:
-        ai_text = generate_reasoning(
+        ai_text = _cached_reasoning(
             threat_type    = scenario,
             sensors_repr   = str(state.sensors),
             time_to_harm_s = state.time_to_harm_s,
@@ -755,15 +433,16 @@ with btn_col:
 
 if send_btn:
     # Derive current threat and sensor state from the last processed tick
-    current_sensors     = last_state.sensors
-    current_threat      = scenario  # the active scenario is the active threat type
-    current_tier        = last_tv   # string: "GREEN" / "YELLOW" / "RED"
+    current_sensors = last_state.sensors
+    current_threat  = scenario   # the active scenario is the active threat type
+    current_tier    = last_tv    # string: "GREEN" / "YELLOW" / "RED"
 
-    result = validate_command(
-        command      = selected_cmd,
-        sensor_state = current_sensors,
-        threat_type  = current_threat,
-        comm_delay_s = comm_delay,
+    result: ValidationResult = validate_command(
+        command          = selected_cmd,
+        sensor_state     = current_sensors,
+        threat_type      = current_threat,
+        comm_delay_s     = comm_delay,
+        _block_report_fn = make_block_report,
     )
 
     # Store in command log (newest first prepend)
@@ -771,9 +450,9 @@ if send_btn:
         "tick":    n_done,
         "tier":    current_tier,
         "cmd":     selected_cmd,
-        "verdict": result["verdict"],
-        "reason":  result["reason"],
-        "report":  result["earth_report"],
+        "verdict": result.verdict,
+        "reason":  result.reason,
+        "report":  result.earth_report,
     })
 
 # Render the most recent command result prominently
